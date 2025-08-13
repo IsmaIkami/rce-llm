@@ -21,22 +21,22 @@ class PotentialGraph:
     atoms: List[Atom]
     relations: List[Dict]
     meta: Dict
-
+    
 def simple_parse(text: str) -> PotentialGraph:
     atoms, rels = [], []
     # quantities like "300 km/h", "5 km", "2.5 m"
-    for i, m in enumerate(re.finditer(r"(\\d+(?:\\.\\d+)?)\\s*([A-Za-z\\/^°%]+)", text)):
+    for i, m in enumerate(re.finditer(r"(\d+(?:\.\d+)?)\s*([A-Za-z\/\^°%]+)", text)):
         val, unit = m.group(1), m.group(2)
-        # very light filtering to avoid stray words (tune as needed)
         if any(x in unit.lower() for x in ["km", "m", "cm", "mm", "kg", "g", "h", "s", "mph", "km/h", "°c"]):
             atoms.append(Atom(id=f"q{i}", type="quantity",
                               label=f"{val} {unit}",
                               attrs={"value": float(val), "unit": unit}))
     # time stamps like "15h", "2024-01-01", "14:30"
-    for j, m in enumerate(re.finditer(r"(\\d{1,2}h(?:\\d{2})?|\\d{1,2}:\\d{2}|\\d{4}-\\d{2}-\\d{2})", text)):
+    for j, m in enumerate(re.finditer(r"(\d{1,2}h(?:\d{2})?|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2})", text)):
         atoms.append(Atom(id=f"t{j}", type="time",
                           label=m.group(1), attrs={"time": m.group(1)}))
     return PotentialGraph(atoms=atoms, relations=[], meta={"text": text})
+
 
 def units_consistency_score(gp: PotentialGraph) -> float:
     """soft score: 1.0 if all quantities have compatible dimensions when they share the same unit word,
