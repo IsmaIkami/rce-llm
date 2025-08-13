@@ -23,19 +23,21 @@ class PotentialGraph:
     meta: Dict
     
 def simple_parse(text: str) -> PotentialGraph:
-    atoms, rels = [], []
-    # quantities like "300 km/h", "5 km", "2.5 m"
-    for i, m in enumerate(re.finditer(r"(\d+(?:\.\d+)?)\s*([A-Za-z\/\^°%]+)", text)):
-        val, unit = m.group(1), m.group(2)
-        if any(x in unit.lower() for x in ["km", "m", "cm", "mm", "kg", "g", "h", "s", "mph", "km/h", "°c"]):
-            atoms.append(Atom(id=f"q{i}", type="quantity",
-                              label=f"{val} {unit}",
-                              attrs={"value": float(val), "unit": unit}))
-    # time stamps like "15h", "2024-01-01", "14:30"
-    for j, m in enumerate(re.finditer(r"(\d{1,2}h(?:\d{2})?|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2})", text)):
-        atoms.append(Atom(id=f"t{j}", type="time",
-                          label=m.group(1), attrs={"time": m.group(1)}))
-    return PotentialGraph(atoms=atoms, relations=[], meta={"text": text})
+    try:
+        atoms, rels = [], []
+        for i, m in enumerate(re.finditer(r"(\d+(?:\.\d+)?)\s*([A-Za-z/\^°%]+)", text)):
+            val, unit = m.group(1), m.group(2)
+            if any(x in unit.lower() for x in ["km", "m", "cm", "mm", "kg", "g", "h", "s", "mph", "km/h", "°c"]):
+                atoms.append(Atom(id=f"q{i}", type="quantity",
+                                  label=f"{val} {unit}",
+                                  attrs={"value": float(val), "unit": unit}))
+        for j, m in enumerate(re.finditer(r"(\d{1,2}h(?:\d{2})?|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2})", text)):
+            atoms.append(Atom(id=f"t{j}", type="time",
+                              label=m.group(1), attrs={"time": m.group(1)}))
+        return PotentialGraph(atoms=atoms, relations=[], meta={"text": text})
+    except Exception:
+        return PotentialGraph(atoms=[], relations=[], meta={"text": text})
+
 
 
 def units_consistency_score(gp: PotentialGraph) -> float:
@@ -81,9 +83,20 @@ HF_MODEL = os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
 HF_TOKEN = os.environ.get("HF_TOKEN")  # set this in Streamlit secrets
 
 def generate_candidates(prompt: str, n: int = 2, max_new_tokens: int = 256) -> List[str]:
-    if not HF_TOKEN:
-        return [("⚠️ Set HF_TOKEN in Streamlit secrets for generation.",)]
-    client = InferenceClient(model=HF_MODEL, token=HF_TOKEN)
+    token = os.environ.get("HF_TOKEN")
+    model = os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
+
+    # fallback: no token → return simple deterministic baselines
+    if not token:
+        # two naïve candidates so the demo still works
+        return [
+            "I will compute the meeting point step by step, checking units and times.",
+            "They meet roughly halfway along the route, depending on relative speeds and departure times."
+        ]
+
+    from huggingface_hub import InferenceClient
+    client = InferenceClient(model=model, token=token)
+
     outs = []
     for _ in range(n):
         text = client.text_generation(
@@ -93,14 +106,15 @@ def generate_candidates(prompt: str, n: int = 2, max_new_tokens: int = 256) -> L
             top_p=0.9,
             repetition_penalty=1.05,
         )
-        outs.append(text)
+        # ensure it's a plain string
+        outs.append(str(text))
     return outs
 
 def rce_rerank(prompt: str) -> Dict:
-    # parse the prompt (optional), but most importantly parse each candidate output
     candidates = generate_candidates(prompt, n=2)
     scored = []
     for y in candidates:
+        y = str(y)  # safety: guarantee string
         gp = simple_parse(y)
         scored.append((y, coherence_mu(gp)))
     best = max(scored, key=lambda x: x[1]) if scored else ("", 0.0)
