@@ -2,7 +2,7 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -24,7 +24,7 @@ class Atom:
     id: str
     type: str   # "entity" | "event" | "quantity" | "time" | "class" | "location"
     label: str
-    attrs: Dict
+    attrs: Dict[str, Any]
 
 @dataclass
 class Relation:
@@ -37,7 +37,7 @@ class Relation:
 class PotentialGraph:
     atoms: List[Atom]
     relations: List[Relation]
-    meta: Dict
+    meta: Dict[str, Any]
 
 # ================================
 # Normalization & Lexicons
@@ -111,10 +111,7 @@ def parse_times(text: str) -> List[Atom]:
     return ats
 
 def parse_locations(text: str) -> List[Atom]:
-    """
-    Very light location detection:
-    - Any capitalized word is a location candidate (quick demo; replace with NER later).
-    """
+    """Quick location candidates (capitalized words). Replace with NER later."""
     ats: List[Atom] = []
     seen = set()
     for w in re.findall(r"\b[A-Z][a-zA-ZÀ-ÖØ-öø-ÿ]+\b", text):
@@ -125,11 +122,7 @@ def parse_locations(text: str) -> List[Atom]:
     return ats
 
 def parse_agents(text: str) -> List[Atom]:
-    """
-    Detect two moving agents generically:
-    - "A <noun> ... Another ..."  → agent1, agent2 (label agent1 by noun)
-    - Else if motion cues present → generic agent1/agent2
-    """
+    """Find two moving agents generically."""
     ats: List[Atom] = []
     m = re.search(r"\b(?:a|an)\s+([A-Za-z\-]+)\b.*?\b(?:another|second)\b", text, flags=re.I|re.S)
     if m:
@@ -142,7 +135,7 @@ def parse_agents(text: str) -> List[Atom]:
         ats.append(Atom(id="agent2", type="entity", label="Agent 2", attrs={"kind":"agent"}))
     return ats
 
-def parse_is_a(text: str):
+def parse_is_a(text: str) -> Tuple[List[Atom], List[Relation]]:
     atoms: List[Atom] = []
     rels: List[Relation] = []
     m = re.search(r"\b(?:a|an)?\s*([A-Za-z\-]+)\s+is\s+(?:a|an)?\s*([A-Za-z\-]+)", text, flags=re.I)
@@ -161,13 +154,7 @@ def parse_is_a(text: str):
     return atoms, rels
 
 def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
-    """
-    Generic motion relations:
-      agent -> depart_from location
-      agent -> towards location
-      agent -> depart_time time
-      agent -> speed quantity
-    """
+    """Generic motion relations for two agents."""
     id_by_label = {a.label.lower(): a.id for a in atoms}
     id_by_type: Dict[str, List[str]] = {}
     for a in atoms:
@@ -184,7 +171,7 @@ def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
         rels.append(Relation("agent1", loc_src, "depart_from", 1.0))
         rels.append(Relation("agent1", loc_dst, "towards", 1.0))
 
-    # second leg "... another ... leaves Y ... towards X" → agent2
+    # "... another ... leaves Y ... towards X" → agent2
     m2 = re.search(r"\b(?:another|second)\b.*?\bleaves?\s+([A-Za-zÀ-ÖØ-öø-ÿ]+).*?\b(?:towards|to)\s+([A-Za-zÀ-ÖØ-öø-ÿ]+)",
                    text, flags=re.I|re.S)
     if m2 and "agent2" in id_by_type.get("entity", []):
@@ -194,7 +181,7 @@ def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
         rels.append(Relation("agent2", loc_src2, "depart_from", 1.0))
         rels.append(Relation("agent2", loc_dst2, "towards", 1.0))
 
-    # first/second time & speed
+    # attach first/second time & speed
     times = [a for a in atoms if a.type == "time"]
     if times and "agent1" in id_by_type.get("entity", []):
         rels.append(Relation("agent1", times[0].id, "depart_time", 1.0))
@@ -226,25 +213,18 @@ def build_gp(text: str) -> PotentialGraph:
     return PotentialGraph(atoms=atoms, relations=rels, meta={"text": text})
 
 # ================================
-# Quantity helpers (robust)
+# Quantity helpers
 # ================================
 def make_quantity(value: float, unit_str: str):
-    """
-    Robustly construct a pint quantity from (value, unit_str).
-    Tries multiple normalizations before giving up.
-    """
+    """Robustly build a pint quantity from (value, unit_str)."""
     candidates = []
     u0 = normalize_unit(unit_str)
     candidates.append(u0)
-    # also try replacing ' per ' with '/'
     candidates.append(u0.replace(" per ", " / "))
-    # and collapsing spaces around slashes
     candidates.append(u0.replace(" / ", "/"))
-    # final: expand short forms if any remain
     for short, full in BASIC_UNIT_MAP.items():
         if u0 == short:
             candidates.append(full)
-
     last_exc = None
     for u in candidates:
         try:
@@ -266,10 +246,8 @@ def units_ok(gp: PotentialGraph) -> Tuple[float, List[str]]:
             q = by_id[r.dst]
             try:
                 qty = make_quantity(q.attrs["value"], q.attrs["unit"])
-                # must be a velocity (dimension L/T)
                 if not qty.check("[length] / [time]"):
                     ok = min(ok, 0.5); msgs.append(f"not a speed unit: {q.label}")
-                # heuristic: prefer per-hour or per-second units (fine either way)
                 u = q.attrs["unit"]
                 if ("hour" not in u) and ("second" not in u) and ("/" not in u):
                     ok = min(ok, 0.7); msgs.append(f"suspicious speed unit: {q.label}")
@@ -341,7 +319,7 @@ def actualize(gp: PotentialGraph) -> PotentialGraph:
         if r.rtype == "speed":
             try:
                 qty = make_quantity(by_id[r.dst].attrs["value"], by_id[r.dst].attrs["unit"])
-                if not qty.check("[length] / [time]"):  # drop non-velocity quantities
+                if not qty.check("[length] / [time]"):
                     continue
             except Exception:
                 continue
@@ -380,7 +358,7 @@ def show_graph(title: str, gp: PotentialGraph):
     components.html(html, height=520, scrolling=True)
 
 # ================================
-# Rendering & Alignment
+# Resolvers (Ω* -> facts -> answer)
 # ================================
 def lexicalizations(gp: PotentialGraph) -> List[str]:
     lex = []
@@ -398,7 +376,7 @@ def alignment_score(text: str, gp: PotentialGraph) -> float:
     hits = sum(1 for x in lex if x in t)
     return hits / len(lex)
 
-# ----- helpers for motion numeric solver -----
+# ---- MOTION resolver ----
 def parse_clock_to_hours(t: str) -> Optional[float]:
     try:
         dt = dtparse(str(t))
@@ -421,20 +399,14 @@ def first_distance_quantity(atoms: List[Atom]) -> Optional[ureg.Quantity]:
     for a in atoms:
         if a.type != "quantity":
             continue
-        u = (a.attrs.get("unit") or "").lower()
-        if ("hour" in u) or ("/" in u) or ("second" in u):  # skip speeds
-            try:
-                qty = make_quantity(a.attrs["value"], a.attrs["unit"])
-                if qty.check("[length] / [time]"):
-                    continue
-            except Exception:
-                pass
         try:
             qty = make_quantity(a.attrs["value"], a.attrs["unit"])
-            if qty.check("[length]"):
-                return qty
         except Exception:
-            pass
+            continue
+        if qty.check("[length] / [time]"):  # speed
+            continue
+        if qty.check("[length]"):
+            return qty
     return None
 
 def collect_motion_params(omega: PotentialGraph):
@@ -458,45 +430,85 @@ def collect_motion_params(omega: PotentialGraph):
     D_km = float(D_qty.to("kilometer").magnitude) if D_qty is not None else None
     return v.get("agent1"), v.get("agent2"), t.get("agent1"), t.get("agent2"), D_km
 
-def solve_meeting(omega: PotentialGraph) -> Optional[str]:
+def resolve_motion(omega: PotentialGraph) -> Optional[Dict[str, Any]]:
     v1, v2, t1, t2, D = collect_motion_params(omega)
     if v1 is None or v2 is None or t1 is None or t2 is None:
         return None
     if D is None:
-        return ("I need the distance between the two locations to compute the meeting time. "
-                "Add something like 'distance 465 km' to the prompt.")
+        return {
+            "type": "motion",
+            "needs_more_info": True,
+            "message": "I need the distance between the two locations for a numeric answer. Add e.g. 'distance 465 km'.",
+        }
 
     delta = abs(t1 - t2)
     d0 = (v1 * delta) if (t1 < t2) else (v2 * delta)
     rel = v1 + v2
-    if rel <= 0: return None
+    if rel <= 0:
+        return None
     tau = (D - d0) / rel
-    if tau < 0: return None
+    if tau < 0:
+        return None
 
     t_meet_from_a1 = tau if t1 >= t2 else (delta + tau)
     s1 = v1 * t_meet_from_a1
     frac = min(max(s1 / D, 0.0), 1.0)
-    return (f"They meet {tau:.2f} h after the later departure. "
-            f"From Agent 1's origin, the meeting point is at ~{s1:.1f} km "
-            f"({frac:.0%} of the {D:.0f} km segment).")
 
-def render_answer(omega: PotentialGraph) -> str:
-    task = omega.meta.get("task","general")
-    if task == "taxonomy":
-        isa = [r for r in omega.relations if r.rtype == "is_a"]
-        if isa:
-            by_id = {a.id: a for a in omega.atoms}
-            r = sorted(isa, key=lambda e: -e.weight)[0]
-            subj = by_id[r.src].label
-            cls  = by_id[r.dst].label
-            art = "an" if cls[0].lower() in "aeiou" else "a"
-            return f"{subj.capitalize()} is {art} {cls}."
+    # render human time: assume "later departure" clock ≈ max(t1,t2)
+    later_clock = max(t1, t2)
+    meet_clock_hours = later_clock + tau
+    meet_h = int(meet_clock_hours) % 24
+    meet_m = int(round((meet_clock_hours - int(meet_clock_hours)) * 60)) % 60
+    meet_clock_str = f"{meet_h:02d}:{meet_m:02d}"
+
+    return {
+        "type": "motion",
+        "needs_more_info": False,
+        "meeting_after_later_departure_h": tau,
+        "meeting_time_clock": meet_clock_str,
+        "distance_from_agent1_km": s1,
+        "distance_from_agent2_km": D - s1,
+        "segment_km": D,
+        "fraction_from_agent1": frac,
+    }
+
+# ---- TAXONOMY resolver ----
+def resolve_taxonomy(omega: PotentialGraph) -> Optional[Dict[str, Any]]:
+    isa = [r for r in omega.relations if r.rtype == "is_a"]
+    if not isa:
+        return None
+    by_id = {a.id: a for a in omega.atoms}
+    r = sorted(isa, key=lambda e: -e.weight)[0]
+    subj = by_id[r.src].label
+    cls  = by_id[r.dst].label
+    art = "an" if cls[0].lower() in "aeiou" else "a"
+    return {"type": "taxonomy", "subject": subj, "class": cls, "text": f"{subj.capitalize()} is {art} {cls}."}
+
+def resolve(omega: PotentialGraph) -> Optional[Dict[str, Any]]:
+    task = omega.meta.get("task", "general")
     if task == "motion":
-        solved = solve_meeting(omega)
-        if solved: return solved
-        return ("Two agents depart with given times and speeds in opposite directions. "
-                "Add a distance (e.g., 'distance 465 km') for a numeric meeting point.")
-    return ""  # general fallback
+        r = resolve_motion(omega)
+        if r: return r
+    if task == "taxonomy":
+        r = resolve_taxonomy(omega)
+        if r: return r
+    return None
+
+def render_answer_from_resolution(res: Dict[str, Any]) -> str:
+    if res["type"] == "taxonomy":
+        return res["text"]
+    if res["type"] == "motion":
+        if res.get("needs_more_info"):
+            return res["message"]
+        tau = res["meeting_after_later_departure_h"]
+        clock = res["meeting_time_clock"]
+        d1 = res["distance_from_agent1_km"]
+        d2 = res["distance_from_agent2_km"]
+        D = res["segment_km"]
+        return (f"They meet about {tau:.2f} h after the later departure (≈ {clock}). "
+                f"From Agent 1's origin: ~{d1:.1f} km; from Agent 2: ~{d2:.1f} km "
+                f"(segment {D:.0f} km).")
+    return ""
 
 # ================================
 # HF generation (robust)
@@ -531,12 +543,12 @@ st.title("RCE LLM — Graph MVP (theory-guided coherence)")
 
 with st.expander("how this demo works"):
     st.markdown(
-        "- extracts atoms (entities, times, quantities, classes, locations) and relations → **potential graph Gᵖ**\n"
-        "- selects a coherent subgraph **Ω*** (actualization) via typing/unit/time checks\n"
-        "- computes a coherence score **μ** with a per-constraint breakdown\n"
-        "- renders a **final answer** from Ω* when possible (taxonomy & generic motion)\n"
-        "- also generates LM candidates and **reranks** them by μ + alignment with Ω*\n"
-        "\nSet `HF_TOKEN` in Streamlit → Settings → Secrets to get real LM generations."
+        "- extract atoms & relations → **potential graph Gᵖ**\n"
+        "- select coherent **Ω*** (typing/unit/time checks)\n"
+        "- compute **μ** (with breakdown), then **resolve** Ω* to **facts**\n"
+        "- show a **final answer** and **resolved facts**\n"
+        "- also generate LM candidates and **rerank** by μ + alignment with Ω*\n"
+        "\nTip: For motion problems, include a distance (e.g., `distance 465 km`) to get numeric results."
     )
 
 prompt = st.text_area(
@@ -578,12 +590,14 @@ if st.button("run"):
     with c4:
         show_graph("Ω* visualization (kept edges)", omega)
 
-    # 3) render a final answer from Ω* (structure-driven)
+    # 3) resolve Ω* to facts and produce final answer
     st.markdown("---")
     st.markdown("### Final answer (from Ω*)")
-    ans = render_answer(omega)
-    if ans:
-        st.success(ans)
+    resolution = resolve(omega)
+    if resolution:
+        st.success(render_answer_from_resolution(resolution))
+        with st.expander("resolved facts"):
+            st.json(resolution)
     else:
         st.info("No direct Ω*-rendered answer; see LM candidates below.")
 
