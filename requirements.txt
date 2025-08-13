@@ -1,0 +1,4 @@
+streamlit
+huggingface_hub>=0.23
+pint
+python-dateutil
