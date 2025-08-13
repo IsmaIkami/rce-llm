@@ -46,15 +46,34 @@ UNIT_ALIASES = {
     "km/h": "kilometer/hour",
     "kmh": "kilometer/hour",
     "kph": "kilometer/hour",
+    "km/hr": "kilometer/hour",
+    "km per hour": "kilometer/hour",
     "m/s": "meter/second",
     "ms-1": "meter/second",
+    "mps": "meter/second",
     "mph": "mile/hour",
     "h": "hour",
     "hr": "hour",
+    "s": "second",
 }
+BASIC_UNIT_MAP = {
+    "km": "kilometer",
+    "m": "meter",
+    "mi": "mile",
+    "sec": "second",
+    "s": "second",
+}
+
 def normalize_unit(u: str) -> str:
     u0 = (u or "").strip().lower()
-    return UNIT_ALIASES.get(u0, u0)
+    if u0 in UNIT_ALIASES:
+        return UNIT_ALIASES[u0]
+    if u0 in BASIC_UNIT_MAP:
+        return BASIC_UNIT_MAP[u0]
+    # tolerate missing spaces around slash
+    if "/" in u0 and " / " not in u0:
+        u0 = u0.replace("/", " / ")
+    return u0
 
 TAXONOMY_LEX = {
     "cat": ["animal", "mammal", "feline"],
@@ -70,14 +89,19 @@ def parse_quantities(text: str) -> List[Atom]:
     ats: List[Atom] = []
     for i, m in enumerate(re.finditer(r"(\d+(?:\.\d+)?)\s*([A-Za-z/\^°%]+)", text)):
         val, unit_raw = m.group(1), m.group(2)
-        unit = normalize_unit(unit_raw)
-        unit_l = unit.lower()
-        keep = any(x in unit_l for x in [
-            "kilometer/hour","mile/hour","kilometer","meter","mile","hour","second","/h"
+        unit_norm = normalize_unit(unit_raw)
+        keep = any(x in unit_norm for x in [
+            "kilometer/hour", "mile/hour", "meter/second", "kilometer", "meter", "mile", "hour", "second"
         ])
         if keep:
-            ats.append(Atom(id=f"q{i}", type="quantity", label=f"{val} {unit_raw}",
-                            attrs={"value": float(val), "unit": unit}))
+            ats.append(
+                Atom(
+                    id=f"q{i}",
+                    type="quantity",
+                    label=f"{val} {unit_raw}",
+                    attrs={"value": float(val), "unit": unit_norm, "unit_raw": unit_raw},
+                )
+            )
     return ats
 
 def parse_times(text: str) -> List[Atom]:
@@ -89,8 +113,7 @@ def parse_times(text: str) -> List[Atom]:
 def parse_locations(text: str) -> List[Atom]:
     """
     Very light location detection:
-    - Any capitalized word (not at sentence start punctuation) is treated as a location candidate.
-    You can replace with spaCy NER later.
+    - Any capitalized word is a location candidate (quick demo; replace with NER later).
     """
     ats: List[Atom] = []
     seen = set()
@@ -104,23 +127,22 @@ def parse_locations(text: str) -> List[Atom]:
 def parse_agents(text: str) -> List[Atom]:
     """
     Detect two moving agents generically:
-    - "A <noun> ... Another ..."  → agent1, agent2 with labels
-    - Otherwise, if motion cues exist, create generic agent1, agent2
+    - "A <noun> ... Another ..."  → agent1, agent2 (label agent1 by noun)
+    - Else if motion cues present → generic agent1/agent2
     """
     ats: List[Atom] = []
-    m = re.search(r"\b(?:a|an)\s+([A-Za-z\-]+)\b.*?\b(?:another|second)\s+(?:[A-Za-z\-]+)?", text, flags=re.I|re.S)
+    m = re.search(r"\b(?:a|an)\s+([A-Za-z\-]+)\b.*?\b(?:another|second)\b", text, flags=re.I|re.S)
     if m:
         label1 = m.group(1).capitalize()
         ats.append(Atom(id="agent1", type="entity", label=label1, attrs={"kind":"agent"}))
         ats.append(Atom(id="agent2", type="entity", label="Agent 2", attrs={"kind":"agent"}))
         return ats
-    # generic agents if motion cues present
     if re.search(r"\b(leaves?|depart|from|towards|to)\b", text, flags=re.I):
         ats.append(Atom(id="agent1", type="entity", label="Agent 1", attrs={"kind":"agent"}))
         ats.append(Atom(id="agent2", type="entity", label="Agent 2", attrs={"kind":"agent"}))
     return ats
 
-def parse_is_a(text: str) -> Tuple[List[Atom], List[Relation]]:
+def parse_is_a(text: str):
     atoms: List[Atom] = []
     rels: List[Relation] = []
     m = re.search(r"\b(?:a|an)?\s*([A-Za-z\-]+)\s+is\s+(?:a|an)?\s*([A-Za-z\-]+)", text, flags=re.I)
@@ -140,11 +162,11 @@ def parse_is_a(text: str) -> Tuple[List[Atom], List[Relation]]:
 
 def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
     """
-    Build generic motion relations:
-    - agent1/agent2 -> depart_from location
-    - agent1/agent2 -> towards location
-    - agent1/agent2 -> depart_time time
-    - agent1/agent2 -> speed quantity (velocity)
+    Generic motion relations:
+      agent -> depart_from location
+      agent -> towards location
+      agent -> depart_time time
+      agent -> speed quantity
     """
     id_by_label = {a.label.lower(): a.id for a in atoms}
     id_by_type: Dict[str, List[str]] = {}
@@ -153,7 +175,7 @@ def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
 
     rels: List[Relation] = []
 
-    # find "from X to/towards Y" (first occurrence → agent1)
+    # "from X to/towards Y" (first occurrence → agent1)
     m1 = re.search(r"\bfrom\s+([A-Za-zÀ-ÖØ-öø-ÿ]+)\s+(?:to|towards)\s+([A-Za-zÀ-ÖØ-öø-ÿ]+)", text, flags=re.I)
     if m1 and "agent1" in id_by_type.get("entity", []):
         src, dst = m1.group(1).lower(), m1.group(2).lower()
@@ -162,7 +184,7 @@ def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
         rels.append(Relation("agent1", loc_src, "depart_from", 1.0))
         rels.append(Relation("agent1", loc_dst, "towards", 1.0))
 
-    # second "leaves Y ... towards X" → agent2
+    # second leg "... another ... leaves Y ... towards X" → agent2
     m2 = re.search(r"\b(?:another|second)\b.*?\bleaves?\s+([A-Za-zÀ-ÖØ-öø-ÿ]+).*?\b(?:towards|to)\s+([A-Za-zÀ-ÖØ-öø-ÿ]+)",
                    text, flags=re.I|re.S)
     if m2 and "agent2" in id_by_type.get("entity", []):
@@ -172,14 +194,14 @@ def build_relations_motion(text: str, atoms: List[Atom]) -> List[Relation]:
         rels.append(Relation("agent2", loc_src2, "depart_from", 1.0))
         rels.append(Relation("agent2", loc_dst2, "towards", 1.0))
 
-    # attach first/second time & speed
+    # first/second time & speed
     times = [a for a in atoms if a.type == "time"]
     if times and "agent1" in id_by_type.get("entity", []):
         rels.append(Relation("agent1", times[0].id, "depart_time", 1.0))
     if len(times) >= 2 and "agent2" in id_by_type.get("entity", []):
         rels.append(Relation("agent2", times[1].id, "depart_time", 1.0))
 
-    speeds = [a for a in atoms if a.type == "quantity" and ("hour" in a.attrs.get("unit","") or "/h" in a.attrs.get("unit",""))]
+    speeds = [a for a in atoms if a.type == "quantity" and ("/" in a.attrs.get("unit","") or "hour" in a.attrs.get("unit","") or "second" in a.attrs.get("unit",""))]
     if speeds and "agent1" in id_by_type.get("entity", []):
         rels.append(Relation("agent1", speeds[0].id, "speed", 1.0))
     if len(speeds) >= 2 and "agent2" in id_by_type.get("entity", []):
@@ -204,6 +226,35 @@ def build_gp(text: str) -> PotentialGraph:
     return PotentialGraph(atoms=atoms, relations=rels, meta={"text": text})
 
 # ================================
+# Quantity helpers (robust)
+# ================================
+def make_quantity(value: float, unit_str: str):
+    """
+    Robustly construct a pint quantity from (value, unit_str).
+    Tries multiple normalizations before giving up.
+    """
+    candidates = []
+    u0 = normalize_unit(unit_str)
+    candidates.append(u0)
+    # also try replacing ' per ' with '/'
+    candidates.append(u0.replace(" per ", " / "))
+    # and collapsing spaces around slashes
+    candidates.append(u0.replace(" / ", "/"))
+    # final: expand short forms if any remain
+    for short, full in BASIC_UNIT_MAP.items():
+        if u0 == short:
+            candidates.append(full)
+
+    last_exc = None
+    for u in candidates:
+        try:
+            return value * ureg(u)
+        except Exception as e:
+            last_exc = e
+            continue
+    raise last_exc if last_exc else ValueError(f"Bad unit: {unit_str}")
+
+# ================================
 # Constraints & μ
 # ================================
 def units_ok(gp: PotentialGraph) -> Tuple[float, List[str]]:
@@ -214,14 +265,16 @@ def units_ok(gp: PotentialGraph) -> Tuple[float, List[str]]:
         if r.rtype == "speed":
             q = by_id[r.dst]
             try:
-                qty = q.attrs["value"] * ureg(q.attrs["unit"])  # corrected pint usage
+                qty = make_quantity(q.attrs["value"], q.attrs["unit"])
+                # must be a velocity (dimension L/T)
                 if not qty.check("[length] / [time]"):
                     ok = min(ok, 0.5); msgs.append(f"not a speed unit: {q.label}")
-                u = q.attrs["unit"].lower()
-                if "hour" not in u and "/h" not in u:
-                    ok = min(ok, 0.6); msgs.append(f"suspicious speed unit: {q.label}")
+                # heuristic: prefer per-hour or per-second units (fine either way)
+                u = q.attrs["unit"]
+                if ("hour" not in u) and ("second" not in u) and ("/" not in u):
+                    ok = min(ok, 0.7); msgs.append(f"suspicious speed unit: {q.label}")
             except Exception:
-                ok = min(ok, 0.5); msgs.append(f"unknown unit: {q.label}")
+                ok = min(ok, 0.5); msgs.append(f"unknown unit: {q.attrs.get('unit_raw', q.label)}")
     return ok, msgs
 
 def time_ok(gp: PotentialGraph) -> Tuple[float, List[str]]:
@@ -270,7 +323,7 @@ def mu(gp: PotentialGraph) -> Tuple[float, Dict[str, float], List[str]]:
 # ================================
 def detect_task(text: str) -> str:
     if re.search(r"\b[aA]n?\s+[A-Za-z\-]+\s+is\s+", text): return "taxonomy"
-    if re.search(r"\b(leaves?|depart|from|towards|to|km/h|mph)\b", text, flags=re.I): return "motion"
+    if re.search(r"\b(leaves?|depart|from|towards|to|km/h|mph|m/s)\b", text, flags=re.I): return "motion"
     return "general"
 
 def actualize(gp: PotentialGraph) -> PotentialGraph:
@@ -286,8 +339,12 @@ def actualize(gp: PotentialGraph) -> PotentialGraph:
             except Exception: keep_time = False
             if not keep_time: continue
         if r.rtype == "speed":
-            u = by_id[r.dst].attrs.get("unit","").lower()
-            if "hour" not in u and "/h" not in u: continue
+            try:
+                qty = make_quantity(by_id[r.dst].attrs["value"], by_id[r.dst].attrs["unit"])
+                if not qty.check("[length] / [time]"):  # drop non-velocity quantities
+                    continue
+            except Exception:
+                continue
 
         if task == "taxonomy" and r.rtype == "is_a":
             kept.append(r)
@@ -355,7 +412,7 @@ def parse_clock_to_hours(t: str) -> Optional[float]:
 
 def speed_to_kmh(a: Atom) -> Optional[float]:
     try:
-        qty = a.attrs["value"] * ureg(a.attrs["unit"])
+        qty = make_quantity(a.attrs["value"], a.attrs["unit"])
         return float(qty.to("kilometer/hour").magnitude)
     except Exception:
         return None
@@ -365,10 +422,15 @@ def first_distance_quantity(atoms: List[Atom]) -> Optional[ureg.Quantity]:
         if a.type != "quantity":
             continue
         u = (a.attrs.get("unit") or "").lower()
-        if ("hour" in u) or ("/h" in u):  # skip speeds
-            continue
+        if ("hour" in u) or ("/" in u) or ("second" in u):  # skip speeds
+            try:
+                qty = make_quantity(a.attrs["value"], a.attrs["unit"])
+                if qty.check("[length] / [time]"):
+                    continue
+            except Exception:
+                pass
         try:
-            qty = a.attrs["value"] * ureg(a.attrs["unit"])
+            qty = make_quantity(a.attrs["value"], a.attrs["unit"])
             if qty.check("[length]"):
                 return qty
         except Exception:
